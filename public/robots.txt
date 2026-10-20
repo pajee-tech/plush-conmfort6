@@ -1,0 +1,18 @@
+# Robots.txt for Plush Comfort UK
+# Official Storefront: https://plushcomfort.uk
+
+User-agent: *
+Allow: /
+Allow: /uploads/
+Allow: /assets/
+
+# Disallow private administration, account, and checkout flows
+Disallow: /admin
+Disallow: /admin/
+Disallow: /api/
+Disallow: /basket
+Disallow: /checkout
+Disallow: /account
+
+# Canonical XML Sitemap
+Sitemap: https://plushcomfort.uk/sitemap.xml

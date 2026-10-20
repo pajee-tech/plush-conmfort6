@@ -1,0 +1,6 @@
+{
+  "name": "Plush Comfort UK - Luxury Handcrafted Sofas & Beds",
+  "description": "Premium British furniture e-commerce website for Plush Comfort UK featuring handcrafted sofas, ottoman beds, custom upholstery, and living room essentials.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
