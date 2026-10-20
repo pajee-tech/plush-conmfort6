@@ -1037,7 +1037,22 @@ ${xmlEntries}
 </urlset>`;
 }
 
-export function generateRobotsTxt(baseUrl: string = DEFAULT_ORIGIN): string {
+/**
+ * robots.txt — EDIT HERE to change what search engines may crawl.
+ * Used by the build (dist/robots.txt) and by the Node server (/robots.txt).
+ * blockAll = true (env NOINDEX=true) hides the whole site from Google — use it on a
+ * subdomain / test copy so it does not compete with the main domain.
+ */
+export function generateRobotsTxt(baseUrl: string = DEFAULT_ORIGIN, blockAll = false): string {
+  if (blockAll) {
+    return `# Robots.txt for Plush Comfort UK (${baseUrl})
+# This copy of the store is hidden from search engines (NOINDEX=true).
+# Main store: ${DEFAULT_ORIGIN}
+
+User-agent: *
+Disallow: /
+`;
+  }
   return `# Robots.txt for Plush Comfort UK
 # Official Storefront: ${baseUrl}
 

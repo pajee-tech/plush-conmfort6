@@ -117,18 +117,20 @@ async function runPrerender() {
   fs.writeFileSync(path.join(DIST_DIR, '404.html'), notFoundHtml, 'utf-8');
 
   // Generate static XML sitemap in dist and public
-  const sitemapXml = generateXmlSitemap(products, categories, blogPosts, 'https://plushcomfort.uk');
+  const sitemapXml = generateXmlSitemap(products, categories, blogPosts, SITE_ORIGIN);
   fs.writeFileSync(path.join(DIST_DIR, 'sitemap.xml'), sitemapXml, 'utf-8');
   fs.writeFileSync(path.join(ROOT_DIR, 'public', 'sitemap.xml'), sitemapXml, 'utf-8');
 
   // Generate static robots.txt in dist and public
-  const robotsTxt = generateRobotsTxt('https://plushcomfort.uk');
+  const robotsTxt = generateRobotsTxt(SITE_ORIGIN, process.env.NOINDEX === 'true');
   fs.writeFileSync(path.join(DIST_DIR, 'robots.txt'), robotsTxt, 'utf-8');
   fs.writeFileSync(path.join(ROOT_DIR, 'public', 'robots.txt'), robotsTxt, 'utf-8');
 
   console.log(`[Prerender] Successfully prerendered ${renderedCount} crawlable routes!`);
   console.log('[Prerender] Generated static sitemap.xml and robots.txt.');
 }
+
+const SITE_ORIGIN = (process.env.SITE_URL || 'https://plushcomfort.uk').replace(/\/+$/, '');
 
 runPrerender().catch((err) => {
   console.error('[Prerender] Error during prerendering:', err);

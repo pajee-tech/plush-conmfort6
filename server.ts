@@ -1,3 +1,4 @@
+import 'dotenv/config'; // loads .env on Hostinger / VPS / local (Vercel uses its own Environment Variables)
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -21,7 +22,18 @@ import {
 } from './src/data/initialData';
 import { Product, Category, BlogPost, StoreSettings, Order } from './src/types';
 import { getEffectiveAccess, AccessAreaId } from './src/utils/permissions';
-import { initDataStore, readData, writeData, refreshIfStale, storageBackendName, hasPendingWrites, flushWrites } from './serverlib/dataStore';
+import {
+  initDataStore,
+  readData,
+  writeData,
+  refreshIfStale,
+  flushWrites,
+  storageBackendName,
+  storageError,
+  filesInDatabase,
+  saveFileToDb,
+  loadFileFromDb,
+} from './serverlib/dataStore';
 import {
   isEmailConfigured,
   isWhatsAppConfigured,
@@ -32,14 +44,24 @@ import {
 } from './serverlib/messaging';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// When running from the bundled file (dist-api/server.mjs on Vercel / Hostinger) the project root is one level up
+const __here = path.dirname(__filename);
+const __dirname = path.basename(__here) === 'dist-api' ? path.dirname(__here) : __here;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SITE_URL = (process.env.SITE_URL || 'https://plushcomfort.uk').replace(/\/+$/, '');
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+// The bundled build (dist-api/server.mjs) always runs in production mode, even if NODE_ENV is not set
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || path.basename(__here) === 'dist-api';
 
 app.set('trust proxy', true);
+// NOINDEX=true → keep this copy (e.g. a subdomain) out of Google
+if (process.env.NOINDEX === 'true') {
+  app.use((_req, res, next) => {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    next();
+  });
+}
 app.use(compression());
 app.use(express.json({ limit: '30mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -64,28 +86,26 @@ try {
 
 const dataReady = initDataStore(DATA_DIR);
 
-// Every request waits for the store to be loaded (and refreshes MySQL cache when stale)
-app.use(async (_req, _res, next) => {
+// Every request waits for the store to be loaded and refreshes the database cache.
+// Requests that change data always read the very latest copy first (several serverless
+// instances may be running), and the response is only sent once all writes are saved —
+// otherwise Vercel can freeze the function before the database write finishes.
+app.use(async (req, res, next) => {
   try {
     await dataReady;
-    await refreshIfStale();
+    await refreshIfStale(req.method !== 'GET' && req.method !== 'HEAD');
   } catch {}
-  next();
-});
-
-// Do not send the response until pending database writes are saved (login sessions, orders, edits).
-// Serverless hosts (Vercel) freeze the function right after the response, which would lose unsaved writes.
-app.use((_req, res, next) => {
-  const originalEnd = res.end.bind(res) as (...a: any[]) => Response;
+  const originalEnd = res.end.bind(res) as (...a: any[]) => any;
   (res as any).end = (...args: any[]) => {
-    if (!hasPendingWrites()) return originalEnd(...args);
-    flushWrites().finally(() => originalEnd(...args));
+    flushWrites()
+      .catch(() => {})
+      .finally(() => originalEnd(...args));
     return res;
   };
   next();
 });
 
-// Data keys (file name in /data or row key in the pc_store table)
+// Data keys (file name in /data or row key in MySQL table pc_store)
 const K = {
   USERS: 'admin_users',
   SESSIONS: 'active_sessions',
@@ -321,12 +341,18 @@ interface AuthenticatedRequest extends Request {
   user?: StoredSession;
 }
 
-function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+async function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const token = req.headers['authorization']?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Authentication token required' });
 
-  const sessions = getSessions();
-  const idx = sessions.findIndex((s) => s.token === token);
+  let sessions = getSessions();
+  let idx = sessions.findIndex((s) => s.token === token);
+  if (idx === -1) {
+    // The session may have been created moments ago on another server instance
+    await refreshIfStale(true);
+    sessions = getSessions();
+    idx = sessions.findIndex((s) => s.token === token);
+  }
   if (idx === -1) return res.status(401).json({ error: 'Session expired or invalidated. Please log in again.' });
 
   const session = sessions[idx];
@@ -386,9 +412,10 @@ app.get('/api/auth/config', (_req, res) => {
   });
 });
 
-app.get('/api/auth/status', (req: Request, res: Response) => {
-  const users = getUsers();
+app.get('/api/auth/status', async (req: Request, res: Response) => {
   const token = req.headers['authorization']?.split(' ')[1];
+  if (token && !getSessions().some((s) => s.token === token)) await refreshIfStale(true);
+  const users = getUsers();
   const session = token ? getSessions().find((s) => s.token === token) : undefined;
   const user = session ? users.find((u) => u.id === session.userId && u.isActive) : undefined;
   res.json({
@@ -993,7 +1020,7 @@ app.post('/api/audit-logs', authenticateToken, (req: AuthenticatedRequest, res: 
 // ==========================================
 // MEDIA UPLOAD (images are compressed to WebP in the browser before upload)
 // ==========================================
-app.post('/api/upload', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/upload', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const { data, filename, alt } = req.body || {};
   if (!data || !filename) return res.status(400).json({ error: 'Base64 data and filename are required.' });
 
@@ -1014,7 +1041,20 @@ app.post('/api/upload', authenticateToken, (req: AuthenticatedRequest, res: Resp
     .replace(/-+/g, '-')
     .slice(0, 80);
   const finalFilename = `${cleanName}-${Date.now()}.${ext}`;
-  fs.writeFileSync(path.join(UPLOADS_DIR, finalFilename), buffer);
+  try {
+    fs.writeFileSync(path.join(UPLOADS_DIR, finalFilename), buffer);
+  } catch (err) {
+    if (!filesInDatabase()) return res.status(500).json({ error: 'Could not save the file on the server.' });
+  }
+  // With a database, uploads are also kept there so they survive on Vercel / serverless
+  if (filesInDatabase()) {
+    try {
+      await saveFileToDb(finalFilename, `${kind}/${matches[2]}`, buffer);
+    } catch (err: any) {
+      console.error('[upload] database save failed:', err);
+      return res.status(500).json({ error: 'Could not save the file in the database.' });
+    }
+  }
 
   recordAuditLog({
     ...actor(req),
@@ -1243,7 +1283,7 @@ app.get('/robots.txt', (_req, res) => {
   try {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=86400');
-    res.status(200).send(generateRobotsTxt(SITE_URL));
+    res.status(200).send(generateRobotsTxt(SITE_URL, process.env.NOINDEX === 'true'));
   } catch {
     res.status(500).send('User-agent: *\nAllow: /\n');
   }
@@ -1274,7 +1314,13 @@ app.post('/api/seo/auto-fix', authenticateToken, requireAccess('products', 'cate
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, storage: storageBackendName(), time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    storage: storageBackendName(),
+    databaseError: storageError() || undefined,
+    persistent: storageBackendName() !== 'file' || !process.env.VERCEL,
+    time: new Date().toISOString(),
+  });
 });
 
 // ==========================================
@@ -1295,6 +1341,18 @@ app.get(/^\/(uploads|assets\/brand)\/.+\.(jpe?g|png)$/i, (req, res, next) => {
 
 // Runtime uploads (served in dev and production)
 app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '30d', fallthrough: true }));
+// …and from the database when the file is not on this server's disk (Vercel)
+app.get('/uploads/:name', async (req, res, next) => {
+  try {
+    const file = await loadFileFromDb(path.basename(req.params.name));
+    if (!file) return next();
+    res.setHeader('Content-Type', file.mime);
+    res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+    return res.send(file.data);
+  } catch {
+    return next();
+  }
+});
 
 async function startServer() {
   await dataReady;
